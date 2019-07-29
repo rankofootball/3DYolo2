@@ -97,7 +97,7 @@ def decode_netout(netout, anchors, nb_class, obj_threshold=0.3, nms_threshold=0.
                 
                     if np.sum(classes) > 0:
                         # first 4 elements are x, y, w, and h
-                        x, y, z, w, h, d = netout[row,col,b,:6]
+                        x, y, z, w, h, d = netout[mmp,row,col,b,:6]
 
                         x = (col + _sigmoid(x)) / grid_w # center position, unit: image width
                         y = (row + _sigmoid(y)) / grid_h # center position, unit: image height

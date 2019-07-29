@@ -8,6 +8,7 @@ from keras.utils import Sequence
 import xml.etree.ElementTree as ET
 from utils3D import BoundBox, bbox_iou
 from skimage import io
+from keras.preprocessing.image import ImageDataGenerator
 
 
 def parse_annotation(ann_dir, img_dir, labels=[]):
@@ -171,7 +172,6 @@ class BatchGenerator(Sequence):
     def __getitem__(self, idx):
         l_bound = idx*self.config['BATCH_SIZE']
         r_bound = (idx+1)*self.config['BATCH_SIZE']
-
         if r_bound > len(self.images):
             r_bound = len(self.images)
             l_bound = r_bound - self.config['BATCH_SIZE']
@@ -218,7 +218,7 @@ class BatchGenerator(Sequence):
                                                0,
                                                center_w,                                                
                                                center_h,
-                                               center_z)
+                                               center_d)
                     
                         for i in range(len(self.anchors)):
                             anchor = self.anchors[i]
@@ -264,10 +264,18 @@ class BatchGenerator(Sequence):
     def on_epoch_end(self):
         if self.shuffle: np.random.shuffle(self.images)
 
+    def brightness_adjustment(self, img, ratio):
+        # convert to int32, so you don't get uint8 overflow
+        # multiply the Value channel by the ratio
+        # clips the result between 0 and 255
+        # convert again to uint8
+        img[:,:] =  np.clip(img[:,:].astype(np.int32) * ratio, 0, 255).astype(np.uint8)
+        return img
+
+
     def aug_image(self, train_instance, jitter):
         image_name = train_instance['filename']
         image = io.imread(image_name)
-        print ( image_name)
 
 #        image=image.reshape((self.config['IMAGE_W'],self.config['IMAGE_H'],self.config['IMAGE_Z'],1))
 #        print (image.shape)
@@ -275,7 +283,10 @@ class BatchGenerator(Sequence):
 
         d, h, w, c  = image.shape
         all_objs = copy.deepcopy(train_instance['object'])
+        bright = .5 + np.random.uniform() 
         scale = np.random.uniform() / 10. + 1.
+        angle = 10. * (np.random.uniform()-0.5)
+        rotate = True 
         flipx = np.random.binomial(1, .5)
         flipy = np.random.binomial(1, .5)
         max_offx = (scale-1.) * w
@@ -283,8 +294,18 @@ class BatchGenerator(Sequence):
         offx = int(np.random.uniform() * max_offx)
         offy = int(np.random.uniform() * max_offy)
 
-        for idx in range(len(image)):
-            img = image[idx, :, :]
+#        img_gen = ImageDataGenerator()
+
+        w2 = self.config['IMAGE_W']
+        h2 = self.config['IMAGE_H']
+        #rotate matrix
+        M = cv2.getRotationMatrix2D((w2/2,h2/2), -angle, 1.0)
+
+        for idxx in range(len(image)):
+            
+            img = image[idxx, :, :]
+
+#            img = self.brightness_adjustment(img,bright)
 
             if jitter:
                 ### scale the image
@@ -297,40 +318,67 @@ class BatchGenerator(Sequence):
                 if flipx > 0.5: img = cv2.flip(img, 1)
                 if flipy > 0.5: img = cv2.flip(img, 0)
 
-            # resize the image to standard size
-            img = cv2.resize(img, (self.config['IMAGE_H'], self.config['IMAGE_W']))
-            image[idx, :, :, :] = img.reshape((self.config['IMAGE_H'], self.config['IMAGE_W'],1))
+# resize the image to standard size
+                img = cv2.resize(img, (self.config['IMAGE_H'], self.config['IMAGE_W']))
+# rotate
+                if rotate:
+                    img = cv2.warpAffine(img,M,(w2,h2))
+
+                    
+
+                image[idxx, :, :, :] = img.reshape((self.config['IMAGE_H'], self.config['IMAGE_W'],1))
 
 #        image = self.aug_pipe.augment_image(image)            
         # fix object's position and size
+
+
         for obj in all_objs:
             for attr in ['xmin', 'xmax']:
-                if jitter: obj[attr] = int(obj[attr] * scale - offx)
-                    
-                obj[attr] = int(obj[attr] * float(self.config['IMAGE_W']) / w)
-                obj[attr] = max(min(obj[attr], self.config['IMAGE_W']), 0)
-                
-            for attr in ['ymin', 'ymax']:
-                if jitter: obj[attr] = int(obj[attr] * scale - offy)
-                    
-                obj[attr] = int(obj[attr] * float(self.config['IMAGE_H']) / h)
-                obj[attr] = max(min(obj[attr], self.config['IMAGE_H']), 0)
-
-            for attr in ['zmin', 'zmax']:
-#                if jitter: obj[attr] = int(obj[attr] * scale - offz)
-                    
-                obj[attr] = int(obj[attr] * float(self.config['IMAGE_Z']) / d)
-                obj[attr] = max(min(obj[attr], self.config['IMAGE_Z']), 0)
-
+                if jitter:
+                    obj[attr] = int(obj[attr] * scale - offx)                    
+                    obj[attr] = int(obj[attr] * float(self.config['IMAGE_W']) / w)
             if jitter and flipx > 0.5:
                 xmin = obj['xmin']
                 obj['xmin'] = self.config['IMAGE_W'] - obj['xmax']
                 obj['xmax'] = self.config['IMAGE_W'] - xmin
+
+#        obj[attr] = max(min(obj[attr], IMAGE_W), 0)
+
+            for attr in ['ymin', 'ymax']:
+                if jitter: 
+                    obj[attr] = int(obj[attr] * scale - offy)
+                    obj[attr] = int(obj[attr] * float(self.config['IMAGE_H']) / h)
+
             if jitter and flipy > 0.5:
                 ymin = obj['ymin']
                 obj['ymin'] = self.config['IMAGE_H'] - obj['ymax']
                 obj['ymax'] = self.config['IMAGE_H'] - ymin
 
-#            print (len(all_objs))   
+            if jitter and rotate:
+                an = angle * np.pi/180.
+                xmin = obj['xmin'] - float(self.config['IMAGE_W'])/2
+                xmax = obj['xmax'] - float(self.config['IMAGE_W'])/2
+                ymin = obj['ymin'] - float(self.config['IMAGE_H'])/2
+                ymax = obj['ymax'] - float(self.config['IMAGE_H'])/2
+                x1 = np.cos(an) * xmin - np.sin(an) * ymin + float(self.config['IMAGE_W'])/2
+                y1 = np.sin(an) * xmin + np.cos(an) * ymin + float(self.config['IMAGE_H'])/2
+                x2 = np.cos(an) * xmax - np.sin(an) * ymin + float(self.config['IMAGE_W'])/2
+                y2 = np.sin(an) * xmax + np.cos(an) * ymin + float(self.config['IMAGE_H'])/2
+                x3 = np.cos(an) * xmax - np.sin(an) * ymax + float(self.config['IMAGE_W'])/2
+                y3 = np.sin(an) * xmax + np.cos(an) * ymax + float(self.config['IMAGE_H'])/2
+                x4 = np.cos(an) * xmin - np.sin(an) * ymax + float(self.config['IMAGE_W'])/2
+                y4 = np.sin(an) * xmin + np.cos(an) * ymax + float(self.config['IMAGE_H'])/2
+                
+                obj['xmin'] = min(x1,x2,x3,x4)
+                obj['xmax'] = max(x1,x2,x3,x4)
+                obj['ymin'] = min(y1,y2,y3,y4)
+                obj['ymax'] = max(y1,y2,y3,y4)
+
+            for attr in ['xmin', 'xmax']: 
+                obj[attr] = max(min(obj[attr], self.config['IMAGE_W']), 0)
+
+            for attr in ['ymin', 'ymax']: 
+                obj[attr] = max(min(obj[attr], self.config['IMAGE_H']), 0)
+
 
         return image, all_objs

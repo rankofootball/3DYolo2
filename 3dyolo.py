@@ -6,7 +6,7 @@ from keras.optimizers import SGD, Adam, RMSprop
 from keras.layers.merge import concatenate
 import matplotlib.pyplot as plt
 import keras.backend as K
-#import tensorflow as tf
+import tensorflow as tf
 import imgaug as ia
 from tqdm import tqdm
 from imgaug import augmenters as iaa
@@ -16,20 +16,26 @@ import os, cv2
 from preprocessing3D import parse_annotation, BatchGenerator
 from utils3D import WeightReader, decode_netout, draw_boxes
 
+from keras.backend.tensorflow_backend import set_session
+config = tf.ConfigProto()
+config.gpu_options.per_process_gpu_memory_fraction = 8.0 
+set_session(tf.Session(config=config))
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-
-import tensorflow as tf
+os.environ["TF_CUDA_HOST_MEM_LIMIT_IN_MB"] = "120000"
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "TRUE"
 
 
 # include large model support
 from tensorflow_large_model_support import LMSKerasCallback 
 # LMSKerasCallback and LMS share a set of keyword arguments. Here we just
 # use the default options.
-lms_callback = LMSKerasCallback()
+#lms_callback = LMSKerasCallback(starting_scope = ['conv_1'],n_tensors=-1, debug=True, debug_level=2)
+lms_callback = LMSKerasCallback(swap_branches = False)
 
 
-
+tf.logging.set_verbosity(tf.logging.INFO)
 
 LABELS = ['spine']
 
@@ -40,7 +46,7 @@ CLASS            = len(LABELS)
 CLASS_WEIGHTS    = np.ones(CLASS, dtype='float32')
 OBJ_THRESHOLD    = 0.3#0.5
 NMS_THRESHOLD    = 0.3#0.45
-ANCHORS          = [0.4, 0.4, 0.4,    0.6, 0.6, 0.6,    0.8, 0.4, 0.4,    0.4, 0.8, 0.4,    0.4, 0.4, 0.8]
+ANCHORS          = [0.5, 0.5, 0.5,    0.8, 0.8, 0.8,    0.8, 0.5, 0.5,    0.5, 0.8, 0.5,    0.5, 0.5, 0.8]
 #ANCHORS          = [0.4, 0.4, 0.4,    0.6, 0.6, 0.6]
 
 NO_OBJECT_SCALE  = 1.0
@@ -48,8 +54,8 @@ OBJECT_SCALE     = 5.0
 COORD_SCALE      = 1.0
 CLASS_SCALE      = 1.0
 
-BATCH_SIZE       = 1  # 16
-WARM_UP_BATCHES  = 4
+BATCH_SIZE       = 2  # 16
+WARM_UP_BATCHES  = 0 
 TRUE_BOX_BUFFER  = 50
 
 
@@ -88,6 +94,9 @@ def space_to_depth_x2(input):
     d_height = GRID_H #tf.math.scalar_mul(1/block_size,s_height)
     d_z = GRID_Z #tf.math.scalar_mul(1/block_size,s_z) 
 
+#    y=tf.reshape(input,[batch_size, d_z, block_size,d_height, block_size, d_width, block_size,s_depth])
+#    y=tf.transpose(y, [0,1,2,3,4,5,7,6])
+
     y=tf.reshape(input,[batch_size, d_z, block_size,d_height, block_size, d_width, block_size*s_depth])
     y=tf.transpose(y, [0,1,2,3,5,4,6])
     y=tf.reshape(y,[batch_size, d_z, block_size,d_height, d_width, block_size*block_size*s_depth])
@@ -102,83 +111,89 @@ def space_to_depth_x2(input):
 
 input_image = Input(shape=(IMAGE_Z, IMAGE_H, IMAGE_W, 1))
 true_boxes  = Input(shape=(1, 1, 1, 1, TRUE_BOX_BUFFER , 6))  # ?,?,?,  #, x,y,z,h,w,d 
-dropout_rate = 0.2
+dropout_rate = 0.0
 
 # Layer 1
 x = Conv3D(32, (3,3,3), strides=(1,1,1), padding='same', name='conv_1', use_bias=False)(input_image)
 x = BatchNormalization(name='norm_1')(x)
 x = LeakyReLU(alpha=0.1)(x)
 x = MaxPooling3D(pool_size=(2, 2, 2))(x)
-Dropout(dropout_rate)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 2
 x = Conv3D(64, (3,3,3), strides=(1,1,1), padding='same', name='conv_2', use_bias=False)(x)
 x = BatchNormalization(name='norm_2')(x)
 x = LeakyReLU(alpha=0.1)(x)
 x = MaxPooling3D(pool_size=(2, 2,2))(x)
-Dropout(dropout_rate)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 3
 x = Conv3D(128, (3,3,3), strides=(1,1,1), padding='same', name='conv_3', use_bias=False)(x)
 x = BatchNormalization(name='norm_3')(x)
 x = LeakyReLU(alpha=0.1)(x)
-Dropout(dropout_rate)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 4
 x = Conv3D(64, (1,1,1), strides=(1,1,1), padding='same', name='conv_4', use_bias=False)(x)
 x = BatchNormalization(name='norm_4')(x)
 x = LeakyReLU(alpha=0.1)(x)
-Dropout(dropout_rate)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 5
 x = Conv3D(128, (3,3,3), strides=(1,1,1), padding='same', name='conv_5', use_bias=False)(x)
 x = BatchNormalization(name='norm_5')(x)
 x = LeakyReLU(alpha=0.1)(x)
 x = MaxPooling3D(pool_size=(2, 2, 2))(x)
-Dropout(dropout_rate)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 6
 x = Conv3D(256, (3,3,3), strides=(1,1,1), padding='same', name='conv_6', use_bias=False)(x)
 x = BatchNormalization(name='norm_6')(x)
 x = LeakyReLU(alpha=0.1)(x)
-Dropout(dropout_rate)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 7
 x = Conv3D(128, (1,1,1), strides=(1,1,1), padding='same', name='conv_7', use_bias=False)(x)
 x = BatchNormalization(name='norm_7')(x)
 x = LeakyReLU(alpha=0.1)(x)
-Dropout(dropout_rate)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 8
 x = Conv3D(256, (3,3,3), strides=(1,1,1), padding='same', name='conv_8', use_bias=False)(x)
 x = BatchNormalization(name='norm_8')(x)
 x = LeakyReLU(alpha=0.1)(x)
 x = MaxPooling3D(pool_size=(2, 2,2))(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 9
 x = Conv3D(512, (3,3,3), strides=(1,1,1), padding='same', name='conv_9', use_bias=False)(x)
 x = BatchNormalization(name='norm_9')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 10
 x = Conv3D(256, (1,1,1), strides=(1,1,1), padding='same', name='conv_10', use_bias=False)(x)
 x = BatchNormalization(name='norm_10')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 11
 x = Conv3D(512, (3,3,3), strides=(1,1,1), padding='same', name='conv_11', use_bias=False)(x)
 x = BatchNormalization(name='norm_11')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 12
 x = Conv3D(256, (1,1,1), strides=(1,1,1), padding='same', name='conv_12', use_bias=False)(x)
 x = BatchNormalization(name='norm_12')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 13
 x = Conv3D(512, (3,3,3), strides=(1,1,1), padding='same', name='conv_13', use_bias=False)(x)
 x = BatchNormalization(name='norm_13')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 skip_connection = x
 
@@ -188,21 +203,25 @@ x = MaxPooling3D(pool_size=(2, 2,2))(x)
 x = Conv3D(1024, (3,3,3), strides=(1,1,1), padding='same', name='conv_14', use_bias=False)(x)
 x = BatchNormalization(name='norm_14')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 15
 x = Conv3D(512, (1,1,1), strides=(1,1,1), padding='same', name='conv_15', use_bias=False)(x)
 x = BatchNormalization(name='norm_15')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 16
 x = Conv3D(1024, (3,3,3), strides=(1,1,1), padding='same', name='conv_16', use_bias=False)(x)
 x = BatchNormalization(name='norm_16')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 17
 x = Conv3D(512, (1,1,1), strides=(1,1,1), padding='same', name='conv_17', use_bias=False)(x)
 x = BatchNormalization(name='norm_17')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 18
 x = Conv3D(1024, (3,3,3), strides=(1,1,1), padding='same', name='conv_18', use_bias=False)(x)
@@ -213,11 +232,13 @@ x = LeakyReLU(alpha=0.1)(x)
 x = Conv3D(1024, (3,3,3), strides=(1,1,1), padding='same', name='conv_19', use_bias=False)(x)
 x = BatchNormalization(name='norm_19')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 20
 x = Conv3D(1024, (3,3,3), strides=(1,1,1), padding='same', name='conv_20', use_bias=False)(x)
 x = BatchNormalization(name='norm_20')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 21
 skip_connection = Conv3D(64, (1,1,1), strides=(1,1,1), padding='same', name='conv_21', use_bias=False)(skip_connection)
@@ -231,6 +252,7 @@ x = concatenate([skip_connection, x])
 x = Conv3D(1024, (3,3,3), strides=(1,1,1), padding='same', name='conv_22', use_bias=False)(x)
 x = BatchNormalization(name='norm_22')(x)
 x = LeakyReLU(alpha=0.1)(x)
+#Dropout(dropout_rate)(x)
 
 # Layer 23
 #x = Conv2D(BOX * (4 + 1 + CLASS), (1,1), strides=(1,1), padding='same', name='conv_23')(x)
@@ -390,7 +412,7 @@ def custom_loss(y_true, y_pred):
     true_box_conf = iou_scores * y_true[..., 6]
 
     ### adjust class probabilities
-    true_box_class = tf.to_int32(0 *  y_true[..., 6])
+    true_box_class = tf.to_int64(0 *  y_true[..., 6])   # was int32
 #    true_box_class = tf.argmax(y_true[..., 7:], -1)     # original: get index of maximal value over all classes
     
     """
@@ -408,8 +430,8 @@ def custom_loss(y_true, y_pred):
     true_mins    = true_xy - true_wh_half
     true_maxes   = true_xy + true_wh_half
     
-    pred_xy = tf.expand_dims(pred_box_xy, 5)
-    pred_wh = tf.expand_dims(pred_box_wh, 5)
+    pred_xy = tf.expand_dims(pred_box_xy, 5)  
+    pred_wh = tf.expand_dims(pred_box_wh, 5)  
     
     pred_wh_half = pred_wh / 2.
     pred_mins    = pred_xy - pred_wh_half
@@ -426,8 +448,8 @@ def custom_loss(y_true, y_pred):
     union_areas = pred_areas + true_areas - intersect_areas
     iou_scores  = tf.truediv(intersect_areas, union_areas)
 
-    best_ious = tf.reduce_max(iou_scores, axis=5)
-    conf_mask = conf_mask + tf.to_float(best_ious < 0.6) * (1 - y_true[..., 6]) * NO_OBJECT_SCALE
+    best_ious = tf.reduce_max(iou_scores, axis=5) 
+    conf_mask = conf_mask + tf.to_float(best_ious < 0.6) * (1 - y_true[..., 6]) * NO_OBJECT_SCALE          ###### was best_ious < 0.6     -------
     
     # penalize the confidence of the boxes, which are reponsible for corresponding ground truth box
     conf_mask = conf_mask + y_true[..., 6] * OBJECT_SCALE
@@ -462,8 +484,8 @@ def custom_loss(y_true, y_pred):
 
     loss_xy    = tf.reduce_sum(tf.square(true_box_xy-pred_box_xy)     * coord_mask) / (nb_coord_box + 1e-6) / 2.
     loss_wh    = tf.reduce_sum(tf.square(true_box_wh-pred_box_wh)     * coord_mask) / (nb_coord_box + 1e-6) / 2.
-    loss_wh_pred    = tf.reduce_sum(tf.square(pred_box_wh)     * coord_mask) / (nb_coord_box + 1e-6) / 2.
-    loss_wh_true    = tf.reduce_sum(tf.square(true_box_wh)     * coord_mask) / (nb_coord_box + 1e-6) / 2.
+    loss_wh_pred    = tf.reduce_sum(pred_box_wh     * coord_mask) / (nb_coord_box + 1e-6) / 2.
+    loss_wh_true    = tf.reduce_sum(true_box_wh     * coord_mask) / (nb_coord_box + 1e-6) / 2.
     loss_conf  = tf.reduce_sum(tf.square(true_box_conf-pred_box_conf) * conf_mask)  / (nb_conf_box  + 1e-6) / 2.
     loss_class = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=true_box_class, logits=pred_box_class)
     loss_class = tf.reduce_sum(loss_class * class_mask) / (nb_class_box + 1e-6)
@@ -481,8 +503,9 @@ def custom_loss(y_true, y_pred):
     """
     Debugging code
     """   
-    sess = K.get_session()
-    sess.run(tf.contrib.memory_stats.BytesInUse())
+#    sess = K.get_session()
+#    sess.run(tf.contrib.memory_stats.BytesInUse())
+    user7 = tf.contrib.memory_stats.BytesInUse()
 
     current_recall = nb_pred_box/(nb_true_box + 1e-6)
     total_recall = tf.assign_add(total_recall, current_recall) 
@@ -505,6 +528,7 @@ def custom_loss(y_true, y_pred):
     loss = tf.Print(loss, [user4], message='nb conf box \t', summarize=1000)
     loss = tf.Print(loss, [user5], message='iou \t', summarize=1000)
     loss = tf.Print(loss, [user6], message='y_pred 6 \t', summarize=1000)
+    loss = tf.Print(loss, [user7], message='memory \t', summarize=1000)
     return loss
 
 
@@ -561,7 +585,7 @@ early_stop = EarlyStopping(monitor='val_loss',
                            verbose=1)
 
 checkpoint = ModelCheckpoint('weights_spine_3D.h5', 
-                             monitor='loss', 
+                             monitor='val_loss', 
                              verbose=1, 
                              save_best_only=True, 
                              mode='min', 
@@ -575,19 +599,21 @@ tensorboard = TensorBoard(log_dir=os.path.expanduser('~/3dyolo//logs/') + 'spine
                           write_images=False)
 
 
-optimizer = Adam(lr=0.5e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=0.0)
-#optimizer = SGD(lr=1e-4, decay=0.0005, momentum=0.9)
+optimizer = Adam(lr=1.0e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=0.0)
+#optimizer = SGD(lr=1e-5, decay=0.0005, momentum=0.9)
 #optimizer = RMSprop(lr=1e-4, rho=0.9, epsilon=1e-08, decay=0.0)
 
 model.compile(loss=custom_loss, optimizer=optimizer)
 
 model.fit_generator(generator        = train_batch, 
                     steps_per_epoch  = len(train_batch), 
-                    epochs           = 200, 
+                    epochs           = 100, 
+#                    use_multiprocessing = True,
+#                    workers          = 4,
                     verbose          = 1,
                     validation_data  = valid_batch,
                     validation_steps = len(valid_batch),
-                    callbacks        = [early_stop, checkpoint, tensorboard ], 
+                    callbacks        = [early_stop, checkpoint, tensorboard,lms_callback ], 
                     max_queue_size   = 3)
 
 
